@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jazz Bass Walking Line Generator</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .chord-btn.active { @apply ring-2 ring-indigo-400; }
+  .note-cell { min-width: 2.5rem; }
+  @keyframes pulse-note { 0%,100%{background:transparent} 50%{background:#4f46e5;} }
+  .playing { animation: pulse-note 0.3s ease; border-radius:4px; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen p-4">
+<script>
+function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+</script>
+
+<div class="max-w-4xl mx-auto">
+  <h1 class="text-3xl font-bold text-center mb-1 text-indigo-400">Jazz Bass Walking Line Generator</h1>
+  <p class="text-center text-gray-400 mb-6 text-sm">コード進行からウォーキングベースラインを自動生成・Web Audio API再生</p>
+
+  <div class="grid md:grid-cols-3 gap-4 mb-4">
+    <!-- Chord Palette -->
+    <div class="md:col-span-2 bg-gray-900 rounded-xl p-4 border border-gray-700">
+      <h2 class="text-sm font-semibold text-gray-300 mb-3">Chord Palette <span class="text-xs text-gray-500">(click to add to progression)</span></h2>
+      <div class="flex flex-wrap gap-2 mb-2" id="chordPalette"></div>
+    </div>
+    <!-- BPM & Controls -->
+    <div class="bg-gray-900 rounded-xl p-4 border border-gray-700">
+      <h2 class="text-sm font-semibold text-gray-300 mb-3">Controls</h2>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-gray-400 block mb-1">BPM: <span id="bpmVal" class="text-indigo-400 font-bold">120</span></label>
+          <input type="range" id="bpmSlider" min="60" max="200" value="120" class="w-full accent-indigo-500">
+        </div>
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="loopToggle" checked class="accent-indigo-500">
+          <span class="text-sm text-gray-300">Loop</span>
+        </label>
+        <button onclick="generateAndPlay()" id="playBtn"
+          class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 rounded-lg transition-colors">
+          ▶ Generate & Play
+        </button>
+        <button onclick="stopPlay()"
+          class="w-full bg-gray-700 hover:bg-gray-600 text-gray-300 py-2 rounded-lg transition-colors text-sm">
+          ■ Stop
+        </button>
+        <button onclick="clearProgression()"
+          class="w-full bg-gray-800 hover:bg-gray-700 text-gray-400 py-1.5 rounded-lg transition-colors text-xs">
+          Clear Progression
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Progression -->
+  <div class="bg-gray-900 rounded-xl p-4 mb-4 border border-gray-700">
+    <div class="flex justify-between items-center mb-3">
+      <h2 class="text-sm font-semibold text-gray-300">Chord Progression <span class="text-xs text-gray-500">(max 8 chords)</span></h2>
+      <span id="chordCount" class="text-xs text-gray-500">0/8 chords</span>
+    </div>
+    <div id="progressionSlots" class="flex flex-wrap gap-2 min-h-12"></div>
+  </div>
+
+  <!-- Walking Line Display -->
+  <div class="bg-gray-900 rounded-xl p-4 border border-gray-700">
+    <h2 class="text-sm font-semibold text-gray-300 mb-3">Generated Walking Line</h2>
+    <div id="walkingDisplay" class="overflow-x-auto">
+      <p class="text-gray-500 italic text-sm">Add chords and click Generate & Play</p>
+    </div>
+  </div>
+</div>
+
+<script>
+// Note frequencies (MIDI-like, bass register: octaves 1-2)
+const NOTE_FREQ = {
+  'C1':32.70,'C#1':34.65,'D1':36.71,'D#1':38.89,'E1':41.20,'F1':43.65,'F#1':46.25,'G1':49.00,'G#1':51.91,'A1':55.00,'A#1':58.27,'B1':61.74,
+  'C2':65.41,'C#2':69.30,'D2':73.42,'D#2':77.78,'E2':82.41,'F2':87.31,'F#2':92.50,'G2':98.00,'G#2':103.83,'A2':110.00,'A#2':116.54,'B2':123.47,
+  'C3':130.81,'D3':146.83,'E3':164.81,'G3':196.00,'A3':220.00,'B3':246.94,
+};
+
+const CHORDS = {
+  'Cmaj7':  {root:'C',  tones:['C','E','G','B'],   type:'maj7'},
+  'Dm7':    {root:'D',  tones:['D','F','A','C'],    type:'m7'},
+  'Em7':    {root:'E',  tones:['E','G','B','D'],    type:'m7'},
+  'Fmaj7':  {root:'F',  tones:['F','A','C','E'],    type:'maj7'},
+  'G7':     {root:'G',  tones:['G','B','D','F'],    type:'7'},
+  'Am7':    {root:'A',  tones:['A','C','E','G'],    type:'m7'},
+  'Bm7b5':  {root:'B',  tones:['B','D','F','A'],    type:'m7b5'},
+  'D7':     {root:'D',  tones:['D','F#','A','C'],   type:'7'},
+  'Gm7':    {root:'G',  tones:['G','A#','D','F'],   type:'m7'},
+  'C7':     {root:'C',  tones:['C','E','G','A#'],   type:'7'},
+  'Fm7':    {root:'F',  tones:['F','G#','C','D#'],  type:'m7'},
+  'Bb7':    {root:'A#', tones:['A#','D','F','G#'],  type:'7'},
+  'Ebmaj7': {root:'D#', tones:['D#','G','A#','D'],  type:'maj7'},
+  'A7':     {root:'A',  tones:['A','C#','E','G'],   type:'7'},
+  'E7':     {root:'E',  tones:['E','G#','B','D'],   type:'7'},
+  'F7':     {root:'F',  tones:['F','A','C','D#'],   type:'7'},
+};
+
+let progression = ['Dm7','G7','Cmaj7','Cmaj7'];
+let audioCtx = null;
+let playTimeouts = [];
+let isPlaying = false;
+let generatedLine = [];
+
+// Build palette
+const palette = document.getElementById('chordPalette');
+Object.keys(CHORDS).forEach(name => {
+  const btn = document.createElement('button');
+  btn.className = 'px-3 py-1.5 rounded-lg text-sm font-mono font-semibold transition-colors bg-gray-800 hover:bg-indigo-800 border border-gray-700 hover:border-indigo-500';
+  btn.textContent = name;
+  btn.onclick = () => addChord(name);
+  palette.appendChild(btn);
+});
+
+document.getElementById('bpmSlider').addEventListener('input', function() {
+  document.getElementById('bpmVal').textContent = this.value;
+});
+
+function addChord(name) {
+  if (progression.length >= 8) return;
+  progression.push(name);
+  renderProgression();
+}
+
+function removeChord(i) {
+  progression.splice(i,1);
+  renderProgression();
+}
+
+function clearProgression() {
+  progression = [];
+  generatedLine = [];
+  renderProgression();
+  document.getElementById('walkingDisplay').innerHTML = '<p class="text-gray-500 italic text-sm">Add chords and click Generate & Play</p>';
+}
+
+const CHORD_COLORS = ['bg-indigo-800 border-indigo-600','bg-purple-800 border-purple-600','bg-blue-800 border-blue-600','bg-cyan-800 border-cyan-600','bg-teal-800 border-teal-600','bg-green-800 border-green-600','bg-yellow-800 border-yellow-600','bg-orange-800 border-orange-600'];
+
+function renderProgression() {
+  const slots = document.getElementById('progressionSlots');
+  document.getElementById('chordCount').textContent = progression.length + '/8 chords';
+  if (progression.length === 0) {
+    slots.innerHTML = '<p class="text-gray-600 italic text-sm">Click chords above to build a progression</p>';
+    return;
+  }
+  slots.innerHTML = progression.map((ch,i) => `
+    <div class="relative flex items-center ${CHORD_COLORS[i%8].split(' ')[0]} border ${CHORD_COLORS[i%8].split(' ')[1]} rounded-xl px-4 py-2 font-mono text-sm font-bold">
+      <span class="text-xs text-gray-400 absolute -top-2 left-2 bg-gray-900 px-1">${i+1}</span>
+      ${escapeHtml(ch)}
+      <button onclick="removeChord(${i})" class="ml-2 text-gray-400 hover:text-red-400 text-xs">×</button>
+    </div>`).join('');
+}
+
+function noteForRoot(root, octave) {
+  const key = root + octave;
+  return NOTE_FREQ[key] || NOTE_FREQ[root+'2'] || 110;
+}
+
+function generateWalkingLine() {
+  const noteNames = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const line = [];
+  for (let ci=0; ci<progression.length; ci++) {
+    const chord = CHORDS[progression[ci]];
+    const nextChord = ci+1 < progression.length ? CHORDS[progression[ci+1]] : CHORDS[progression[0]];
+    const root = chord.root;
+    const rootIdx = noteNames.indexOf(root);
+    const fifth = noteNames[(rootIdx+7)%12];
+    const nextRoot = nextChord.root;
+    const nextRootIdx = noteNames.indexOf(nextRoot);
+    // approach note: chromatic neighbor
+    const approaching = noteNames[(nextRootIdx - 1 + 12)%12];
+    // beat 1=root, beat 2=fifth or 3rd, beat 3=chord tone, beat 4=approach
+    const b3 = chord.tones[Math.floor(Math.random()*chord.tones.length)];
+    line.push([
+      { note: root+'2', name: root },
+      { note: fifth+'1', name: fifth },
+      { note: b3+'2', name: b3 },
+      { note: approaching+'2', name: approaching + '→' },
+    ]);
+  }
+  return line;
+}
+
+function stopPlay() {
+  playTimeouts.forEach(id => clearTimeout(id));
+  playTimeouts = [];
+  isPlaying = false;
+  if (audioCtx) { try { audioCtx.close(); } catch(e){} audioCtx = null; }
+  // Remove highlight
+  document.querySelectorAll('.playing').forEach(el => el.classList.remove('playing'));
+  document.getElementById('playBtn').textContent = '▶ Generate & Play';
+}
+
+function generateAndPlay() {
+  stopPlay();
+  if (progression.length === 0) return;
+  generatedLine = generateWalkingLine();
+  renderWalkingLine();
+  isPlaying = true;
+  document.getElementById('playBtn').textContent = '⟳ Playing...';
+  schedulePlayback();
+}
+
+function schedulePlayback() {
+  if (!isPlaying) return;
+  const bpm = parseInt(document.getElementById('bpmSlider').value);
+  const beatMs = (60/bpm)*1000;
+  const loop = document.getElementById('loopToggle').checked;
+  const totalBeats = generatedLine.length * 4;
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const startTime = audioCtx.currentTime + 0.05;
+
+  generatedLine.forEach((chordBeats, ci) => {
+    chordBeats.forEach((beat, bi) => {
+      const t = startTime + (ci*4+bi) * beatMs/1000;
+      const freq = NOTE_FREQ[beat.note] || 110;
+      // Schedule audio
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass'; filter.frequency.value = 400;
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      osc.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+      gain.gain.setValueAtTime(0.4, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + beatMs/1000*0.9);
+      osc.start(t); osc.stop(t + beatMs/1000*0.9);
+      // Schedule highlight
+      const delay = (t - audioCtx.currentTime)*1000;
+      const tid = setTimeout(() => {
+        document.querySelectorAll('.playing').forEach(el => el.classList.remove('playing'));
+        const cell = document.getElementById(`cell_${ci}_${bi}`);
+        if (cell) cell.classList.add('playing');
+      }, delay);
+      playTimeouts.push(tid);
+    });
+  });
+
+  // Loop
+  const totalMs = totalBeats * beatMs;
+  if (loop) {
+    const loopTid = setTimeout(() => {
+      if (isPlaying) schedulePlayback();
+    }, totalMs + 50);
+    playTimeouts.push(loopTid);
+  } else {
+    const endTid = setTimeout(() => {
+      isPlaying = false;
+      document.getElementById('playBtn').textContent = '▶ Generate & Play';
+    }, totalMs + 100);
+    playTimeouts.push(endTid);
+  }
+}
+
+function renderWalkingLine() {
+  const display = document.getElementById('walkingDisplay');
+  if (generatedLine.length === 0) { display.innerHTML = ''; return; }
+  let html = '<div class="space-y-3">';
+  generatedLine.forEach((beats,ci) => {
+    html += `<div>
+      <div class="text-xs text-gray-500 mb-1 font-semibold">${escapeHtml(progression[ci])} (bar ${ci+1})</div>
+      <div class="flex gap-1">`;
+    beats.forEach((beat,bi) => {
+      const isApproach = beat.name.includes('→');
+      html += `<div id="cell_${ci}_${bi}" class="note-cell flex flex-col items-center bg-gray-800 border border-gray-700 rounded-lg p-2 text-center transition-all">
+        <span class="text-xs text-gray-500">${bi+1}</span>
+        <span class="font-mono font-bold text-sm ${isApproach?'text-orange-400':'text-indigo-300'}">${escapeHtml(beat.name)}</span>
+        <span class="text-xs text-gray-600">${escapeHtml(beat.note)}</span>
+      </div>`;
+    });
+    html += '</div></div>';
+  });
+  html += '</div>';
+  display.innerHTML = html;
+}
+
+renderProgression();
+</script>
+</body>
+</html>
